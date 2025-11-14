@@ -1,0 +1,175 @@
+
+# Return the json data for compartment tsupi
+CID=$(oci iam compartment list --name tsupi --compartment-id-in-subtree true --query data[0].id --raw-output)
+
+# VCN CIDR Block in json format.
+VCB='["10.1.0.0/24"]'
+
+# Create the VCN and Return the Id
+VID=$(oci network vcn create --compartment-id $CID --cidr-blocks $VCB --display-name vcn-spark --dns-label vcnspark --query data.id --raw-output)
+
+# Create the Internet Gateway and Return the Id
+IGI=$(oci network internet-gateway create  --compartment-id $CID --is-enabled TRUE --vcn-id $VID --display-name IG --query data.id --raw-output)
+
+# Create the Nat Gateway and Return the Id
+NGI=$(oci network nat-gateway create --compartment-id $CID --vcn-id $VID --display-name NG --query data.id --raw-output)
+
+# List the available Oracle Services
+SID=$(oci network service list --query data[1].id --raw-output)
+
+# Format the Service Id to a valid Json 
+SID='[{"serviceId":"'$SID'"}]'
+
+# Create the Service Gateway and Return the Id
+SGI=$(oci network service-gateway create --compartment-id $CID --services $SID --vcn-id $VID --display-name SG --query data.id --raw-output)
+
+# Create Public Subnet and Return the Id
+SSMI=$(oci network subnet create --cidr-block '10.1.0.0/25' --compartment-id $CID --vcn-id $VID --display-name spark-master --dns-label sparkmaster --query data.id --raw-output)
+
+# Create Private Subnet and Return the Id
+SSWI=$(oci network subnet create --cidr-block '10.1.0.128/25' --compartment-id $CID --vcn-id $VID --display-name spark-worker --dns-label sparkworker --prohibit-public-ip-on-vnic true --query data.id --raw-output)
+
+# Return the Internet Gateway Id 
+#IGI=$(oci network internet-gateway list --compartment-id $CID --vcn-id $VID --display-name IG --query data[0].id --raw-output)
+
+# Return the Nat Gateway Id
+#NGI=$(oci network nat-gateway list --compartment-id $CID --vcn-id $VID --display-name NG --query data[0].id --raw-output)
+
+# Return the Service Gateway Id
+#SGI=$(oci network service-gateway list --compartment-id $CID --vcn-id $VID --query 'data[?"display-name"==`SG`].id|[0]' --raw-output)
+
+# Format the Route Rules for Spark Master to Json format
+RRSM='[{"destination":"0.0.0.0/0","destination-type":"CIDR_BLOCK","network-entity-id":"'$IGI'","route-type":"STATIC"}]'
+
+# Create Route Table For Spark Master Subnet and Return Id
+RTSMI=$(oci network route-table create --compartment-id $CID --route-rules $RRSM --vcn-id $VID --display-name spark-master-rt --query data.id --raw-output)
+
+# Format Route Rules for Spark Worker to Json format
+RRSW='[{"destination":"0.0.0.0/0","destination-type":"CIDR_BLOCK","network-entity-id":"'$NGI'","route-type":"STATIC"},
+       {"destination":"all-xsp-services-in-oracle-services-network","destination-type":"SERVICE_CIDR_BLOCK","network-entity-id":"'$SGI'","route-type":"STATIC"}]'
+
+# Create Route Table for Spark Worker Subnet and Return Id
+RTSWI=$(oci network route-table create --compartment-id $CID --route-rules $RRSW --vcn-id $VID --display-name spark-worker-rt --query data.id --raw-output)
+
+# Update the Spark Master Public Subnet to use Spark Master Route Table 
+oci network subnet update --subnet-id $SSMI --route-table-id $RTSMI --force
+
+# Update the Spark Worker Private Subnet to use Spark Worker Route Table
+oci network subnet update --subnet-id $SSWI --route-table-id $RTSWI --force
+
+# Standard list of IP protocol numbers;
+# TCP = 6
+# UDP = 17
+# ICMP = 1
+
+# Format Spark Master Egress Rules 
+SMESR='[{"destination":"0.0.0.0/0","destination-type":"CIDR_BLOCK","is-stateless":false,"protocol":"all","tcp-options":null,"udp-options":null}]'
+
+# Format Spark Master Ingress Rules
+SMISR='[{"is-stateless":false,"protocol":"6","source":"0.0.0.0/0","source-type":"CIDR_BLOCK","tcp-options":null,"udp-options":null},
+      {"is-stateless":false,"protocol":"1","source":"0.0.0.0/0","source-type":"CIDR_BLOCK","tcp-options":null,"udp-options":null},
+      {"is-stateless":false,"protocol":"17","source":"0.0.0.0/0","source-type":"CIDR_BLOCK","tcp-options":null,"udp-options":null}]'          
+
+# Create Spark Master Security List and Return Id 
+SMSLI=$(oci network security-list create --compartment-id $CID --egress-security-rules $SMESR --ingress-security-rules $SMISR --vcn-id $VID --display-name spark-master-sl --query data.id --raw-output)
+
+# Return the Spark Master Security List Id
+#SMSLI=oci network security-list list --compartment-id $CID --vcn-id $VID --display-name spark-master-sl --query data[0].id --raw-output
+
+# Format Spark Worker Egress Rules
+SWESR='[{"destination":"10.1.0.0/24","destination-type":"CIDR_BLOCK","is-stateless":false,"protocol":"all","tcp-options":null,"udp-options":null}]'
+
+# Format Spark Worker Ingress Rules 
+SWISR='[{"is-stateless":false,"protocol":"6","source":"10.1.0.0/24","source-type":"CIDR_BLOCK","tcp-options":null,"udp-options":null},
+      {"is-stateless":false,"protocol":"1","source":"10.1.0.0/24","source-type":"CIDR_BLOCK","tcp-options":null,"udp-options":null},
+      {"is-stateless":false,"protocol":"17","source":"10.1.0.0/24","source-type":"CIDR_BLOCK","tcp-options":null,"udp-options":null}]'        
+
+# Create Spark Worker Security List
+SWSLI=$(oci network security-list create --compartment-id $CID --egress-security-rules $SWESR --ingress-security-rules $SWISR --vcn-id $VID --display-name spark-worker-sl --query data.id --raw-output)
+
+# Format Spark Master Security List Id to Json Format
+SMSLI='["'$SMSLI'"]'
+
+# Update the Spark Master Subnet to use the Spark Master Security List as Default
+oci network subnet update --subnet-id $SSMI --security-list-ids $SMSLI --force
+
+# Format Spark Worker Security List Id to Json Format
+SWSLI='["'$SWSLI'"]'
+
+# Update the Spark Worker Subnet to use the Spark Worker Security List as Default
+oci network subnet update --subnet-id $SSWI --security-list-ids $SWSLI --force
+
+# Get the Availability Domain for the region
+ADI=$(oci iam availability-domain list --compartment-id $CID --query data[0].name --raw-output)
+
+$ Get the Latest Oracle Autonomous Linux operating system image id
+II=$(oci compute image list --compartment-id $CID --all --query 'data[?"operating-system"==`Oracle Autonomous Linux`].id|[0]' --raw-output)
+
+$ Get the compute shape
+CSI=$(oci compute shape list --compartment-id $CID --query 'data[?"shape"==`VM.Standard.E5.Flex`].shape|[0]' --raw-output)
+
+SSMI=$(oci network subnet list --compartment-id $CID --query 'data[?"display-name"==`spark-master`].id|[0]' --raw-output)
+
+# Set the Shape Configuration json format
+SC='{"memoryInGBs":64,"ocpus":4}'
+
+# Create a compute instance for Spark Master in Spark Master Subnet and Return the Instance Id
+SMCII=$(oci compute instance launch --availability-domain $ADI --compartment-id $CID --display-name sm0ci --shape $CSI --shape-config $SC --image-id $II --ssh-authorized-keys-file /home/supithran_/.ssh/id_rsa.pub --subnet-id $SSMI --boot-volume-size-in-gbs 50 --query data.id --raw-output) 
+
+# Create a compute instance for Spark Worker in Spark Worker Subnet and Return the Instance Id
+SWCII=$(oci compute instance launch --availability-domain $ADI --compartment-id $CID --display-name sw0ci --shape $CSI --shape-config $SC --image-id $II --ssh-authorized-keys-file /home/supithran_/.ssh/id_rsa.pub --subnet-id $SSWI --boot-volume-size-in-gbs 50 --query data.id --raw-output) 
+
+# List the instance id for spark master compute instance
+#oci compute instance list --compartment-id $CID --display-name sm0ci --query data[0].id --raw-output
+
+# List the instance id for spark worker compute instance
+#oci compute instance list --compartment-id $CID --display-name sw0ci --query data[0].id --raw-output
+
+# retrieve the public ip address of spark master compute instance
+SMPIP=$(oci compute instance list-vnics --compartment-id $CID --instance-id $SMCII --query 'data[0]."public-ip"' --raw-output)
+
+# retrieve the private ip address of spark worker compute instance
+SWPIP=$(oci compute instance list-vnics --compartment-id $CID --instance-id $SWCII --query 'data[0]."private-ip"' --raw-output)
+
+##
+###
+### Login to Spark Master, Spark Worker Nodes And Configure Spark
+###
+##
+
+# Part 1 - Pre-reqs for Spark Master and Spark Worker Compute Instance
+
+# Login and execute command to update operating system
+ssh opc@$SMPIP "sudo dnf update -y"
+
+# Check the current version of java sdk
+# Java version 17/21 is required for Spark 4.0
+ssh opc@$SMPIP "sudo su - root -c 'java --version'"
+
+# If Java is not installed, list the available Java packages in Linux Repository
+ssh opc@$SMPIP "sudo su - root -c 'dnf search java | grep -i jdk'"
+
+# Install Java 21 for the latest Apache Spark 4.0
+ssh opc@$SMPIP "sudo su - root -c 'dnf search java | grep -i jdk-21-headful'"
+ssh opc@$SMPIP "sudo su - root -c 'dnf -y install jdk-21-headful.x86_64'"
+ssh opc@$SMPIP "sudo su - root -c 'java -version'"
+
+# Set the JAVA_HOME in opc
+ssh opc@$SMPIP "ls -l \$(readlink -f \$(which java))"
+ssh opc@$SMPIP "echo \"export JAVA_HOME=/usr/lib/jvm/jdk-21.0.9-oracle-x64\" | tee -a ~/.bash_profile;echo \"export PATH=\\\$JAVA_HOME/bin:\\\$PATH\" | tee -a ~/.bash_profile"
+ssh opc@$SMPIP "source ~/.bash_profile;java -version"
+
+# Download Apache Spark And Install
+# https://spark.apache.org/downloads.html
+# Spark Release : 4.0.1
+# Package Type : Pre-built for Apache Hadoop 3.4 and later with Spark Connect Enabled
+ssh opc@$SMPIP "sudo su - root -c 'wget https://dlcdn.apache.org/spark/spark-4.0.1/spark-4.0.1-bin-hadoop3-connect.tgz'"
+ssh opc@$SMPIP "sudo su - root -c 'tar -xzf spark-4.0.1-bin-hadoop3-connect.tgz'"
+ssh opc@$SMPIP "sudo su - root -c 'ls -l'"
+ssh opc@$SMPIP "sudo su - root -c 'mv spark-4.0.1-bin-hadoop3-connect /opt/spark'"
+ssh opc@$SMPIP "sudo su - root -c 'chown -R root:root /opt/spark'"
+
+# Set SPARK_HOME and PATH for spark binaries
+ssh opc@$SMPIP "echo \"export SPARK_HOME=/opt/spark\" | tee -a ~/.bash_profile;echo \"export PATH=\\\$SPARK_HOME/bin:\\\$SPARK_HOME/sbin:\\\$PATH\" | tee -a ~/.bash_profile"
+ssh opc@$SMPIP "source ~/.bash_profile;cd \$SPARK_HOME;ls -l"
+
