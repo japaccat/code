@@ -11,11 +11,11 @@ Gateways: Internet Gateway (IG), NAT Gateway (NG), Service Gateway (SG)
 
 Total Subnets : 2
 
-Public Subnets CIDR : 10.1.0.0/25  --- spark-master
+Public Subnets --- spark-master
 Public Subnet Route Table  --- spark-master-rt
 Public Subnet Security List  --- spark-master-sl
 
-Private Subnet CIDR : 10.1.0.128/25  --- Spark Workers
+Private Subnet --- spark-worker
 Private Subnet Route Table  --- spark-worker-rt
 Private Subnet Security List  --- spark-worker-sl
 
