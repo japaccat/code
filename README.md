@@ -3,6 +3,7 @@ Apache Spark Cluster on OCI Compute
 
 Part 1 
 Create VCN using OCI Cli
+https://github.com/japaccat/code/blob/Apache-Spark-Cluster---VCN/README.md
 
 Part 2
 Create Compute Instance for Spark Master and Spark Worker(s) instances using OCI Cli
