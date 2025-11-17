@@ -1,11 +1,13 @@
 
 Spark Cluster VCN creation scripts.
-Using OCI Cli commands.
-Host : OCI Console Code Editor.
-Region : AP-SINGAPORE-2 -- Singapore West (Singapore)
-Availability Domain : AP-SINGAPORE-2-AD-1 -- AD1
 
-VCN CIDR : 10.1.0.0/24
+Using OCI Cli commands.
+
+Host : OCI Console Code Editor.
+
+Region : AP-SINGAPORE-2 -- Singapore West (Singapore)
+
+Availability Domain : AP-SINGAPORE-2-AD-1 -- AD1
 
 Gateways: Internet Gateway (IG), NAT Gateway (NG), Service Gateway (SG)
 
