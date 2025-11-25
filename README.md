@@ -24,6 +24,8 @@ One Spark Worker in Private Subnet
 # Spark Release : 4.0.1
 Package Type : Pre-built for Apache Hadoop 3.4 and later with Spark Connect Enabled
 
-# Python Packages installed on Spark Master for pyspark : wheel pyspark[sql] pandas pyarrow grpcio protobuf grpcio-status
+# Python Packages installed on Spark Master for pyspark : 
+wheel pyspark[sql] pandas pyarrow grpcio protobuf grpcio-status
 
-# Script : oci-cli-commands-to-provision-spark-cluster
+# Script : 
+oci-cli-commands-to-provision-spark-cluster
