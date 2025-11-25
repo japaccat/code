@@ -2,6 +2,8 @@
 
 OCI Cli scripts executed on Code Editor
 
+Code Editor Network : Public
+
 Region : AP-Singapore-2
 
 # VCN components: 
