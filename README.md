@@ -6,7 +6,7 @@ Region : AP-Singapore-2
 
 # VCN components: 
 
-# Gateways : Internet Gateway,Nat Gateway,Service Gateway
+Gateways : Internet Gateway,Nat Gateway,Service Gateway
 
 # Subnets : Public And Private
 
