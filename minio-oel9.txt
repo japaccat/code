@@ -1,0 +1,150 @@
+
+#
+# MinIO Client Installation On Oracle Linux 9
+# as polaris user
+#
+# Download the MinIO Client binary
+wget https://dl.min.io/client/mc/release/linux-amd64/mc
+# Make it executable
+chmod +x mc
+# Move it to your path
+sudo mv mc /usr/local/bin/
+
+#
+# MinIO Server Installation On Oracle Linux 9
+# as polaris user
+#
+# Download the MinIO Server binary
+wget https://dl.min.io/server/minio/release/linux-amd64/minio
+# Make it executable
+chmod +x minio
+# Move it to your path
+sudo mv minio /usr/local/bin/
+# Start MinIO
+mkdir -p /warehouse/minio-data
+minio server /warehouse/minio-data --address ":9000" --console-address ":9001" &
+# Then use block storage file system with MinIO endpoint
+mc alias set 'myminio' 'http://10.1.0.113:9000' 'minioadmin' 'minioadmin'
+mc alias set ocis3 'https://idxkccw2srke.compat.objectstorage.ap-singapore-2.oci.customer-oci.com' '91d6100189248c72100882acb397ae77dfbd5d0d' '3+d/RSf7nM9wNAmvQ4T08tAQ1XegNVViz6x65dURaJw=' --api s3v4
+mc mb myminio/warehouse
+mc ls myminio
+mc ls myminio/warehouse
+mc ls ocis3
+export MC_REGION=ap-singapore-2
+mc ls ocis3
+
+
+# Configure with systemctl
+#1.Prepare the Environment File
+/usr/local/bin/minio --version
+sudo mkdir -p /etc/default
+sudo nano /etc/default/minio
+# Path to the data directory ( this was created during the minio server installation - line 24)
+MINIO_VOLUMES="/warehouse/minio-data"
+# API and Console addresses
+MINIO_OPTS="--address :9000 --console-address :9001"
+# Your login credentials ( default )
+MINIO_ROOT_USER=minioadmin
+MINIO_ROOT_PASSWORD=minioadmin
+# OCI S3 bucket region
+MC_REGION=ap-singapore-2
+#2.Create the Systemd Service File
+sudo nano /etc/systemd/system/minio.service
+[Unit]
+Description=MinIO
+Documentation=https://docs.min.io
+Wants=network-online.target
+After=network-online.target
+AssertFileIsExecutable=/usr/local/bin/minio
+[Service]
+WorkingDirectory=/usr/local
+User=polaris
+Group=polaris
+ProtectProc=invisible
+EnvironmentFile=/etc/default/minio
+ExecStartPre=/bin/bash -c "if [ -z \"${MINIO_VOLUMES}\" ]; then echo \"Variable MINIO_VOLUMES not set in /etc/default/minio\"; exit 1; fi"
+ExecStart=/usr/local/bin/minio server $MINIO_OPTS $MINIO_VOLUMES
+Restart=always
+LimitNOFILE=65536
+TasksMax=infinity
+TimeoutStopSec=infinity
+SendSIGKILL=no
+[Install]
+WantedBy=multi-user.target
+#3.Enable and Start the Service
+sudo systemctl daemon-reload
+sudo systemctl enable minio
+sudo systemctl start minio
+#4.Verify the Status
+sudo systemctl status minio
+sudo ss -tulpn | grep minio
+sudo journalctl -u minio -f
+
+##
+## To configure MinIO to map to Oracle Cloud Infrastructure (OCI) Object Storage, you essentially treat OCI as an S3-compatible backend.
+##
+Step 1: Generate OCI S3-Compatible Credentials
+OCI refers to S3 credentials as Customer Secret Keys.
+Log in to the OCI Console.
+Open the User menu (profile icon in the top right) and click User Settings.
+On the left side under Resources, click Customer Secret Keys.
+Click Generate Secret Key.
+Enter a name (e.g., "MinIO-Integration").
+Crucial: Copy the Secret Key immediately; you won't see it again.
+Copy the Access Key (displayed in the list after generation).
+----------------
+Access Key 91d6100189248c72100882acb397ae77dfbd5d0d
+Password 3+d/RSf7nM9wNAmvQ4T08tAQ1XegNVViz6x65dURaJw=
+----------------
+Step 2: Identify your OCI S3 Endpoint
+The endpoint depends on your Namespace and Region.
+Namespace: Found on the Tenancy Details page or the Bucket Details page.
+Region Identifier: (e.g., us-ashburn-1, uk-london-1).
+https://<namespace>.compat.objectstorage.<region>.oci.customer-oci.com
+https://idxkccw2srke.compat.objectstorage.ap-singapore-2.oci.customer-oci.com
+Step 3: Configure the MinIO Client (mc)
+Since "Gateway Mode" is gone, the most common way to "map" or bridge the two is using the MinIO Client to manage both.
+export MC_REGION=ap-singapore-2
+mc alias set ocis3 <YOUR_ACCESS_KEY> <YOUR_SECRET_KEY> --api s3v4
+mc ls ocis3
+
+##
+## start the sync when the computer reboots and will restart itself if it ever crashes.
+##
+Step 1:Check the current label
+Run this to see how mc is currently labeled:
+ls -Z /usr/local/bin/mc
+You will likely see something like unconfined_u:object_r:user_home_t:s0 (if you downloaded it to your home folder first) or default_t. Systemd isn't allowed to "execute" those types.
+Step 2:The Permanent Fix (Relabeling)
+You need to tell SELinux that /usr/local/bin/mc is a legitimate system binary. Run these two commands:
+Step 2.1: Add a rule to the SELinux policy for this file
+sudo semanage fcontext -a -t bin_t /usr/local/bin/mc
+Step 2.2: Apply that rule to the file right now
+sudo restorecon -v /usr/local/bin/mc
+Note: If semanage is not found, install it first with sudo dnf install policycoreutils-python-utils.
+Step 2.3: Verify the change
+Run ls -Z again. It should now show bin_t:
+ls -Z /usr/local/bin/mc
+# Expected output: unconfined_u:object_r:bin_t:s0 /usr/local/bin/mc
+Step 3: Create the service file
+sudo nano /etc/systemd/system/minio-sync.service
+Step 4: Paste this configuration
+[Unit]
+Description=MinIO to OCI Object Storage Sync
+After=network.target
+[Service]
+Type=simple
+User=polaris
+Group=polaris
+EnvironmentFile=/etc/default/minio
+ExecStart=/usr/local/bin/mc mirror --watch --overwrite --remove --exclude ".minio.sys/*" /warehouse/minio-data ocis3/backup-bucket
+Restart=always
+RestartSec=10
+[Install]
+WantedBy=multi-user.target
+Step 5: Start and Enable it
+sudo systemctl daemon-reload
+sudo systemctl enable minio-sync
+sudo systemctl start minio-sync
+journalctl -u minio-sync.service --since today
+journalctl -u minio-sync.service -f
