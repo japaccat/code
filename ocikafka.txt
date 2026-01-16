@@ -1,0 +1,246 @@
+
+ssh opc@$SMPIP "sudo useradd -m -s /bin/bash kafka"
+ssh opc@$SMPIP "sudo mkdir -p /home/kafka/.ssh"
+ssh opc@$SMPIP "sudo cp ~/.ssh/authorized_keys /home/kafka/.ssh"
+ssh opc@$SMPIP "sudo chown -R kafka:kafka /home/kafka/.ssh"
+ssh opc@$SMPIP "sudo chmod -R 700 /home/kafka/.ssh"
+ssh opc@$SMPIP "sudo usermod -aG wheel kafka"
+ssh kafka@$SMPIP "ls -las"
+ssh kafka@$SMPIP "sudo ls -las /"
+
+
+# 0. Download Kafka binaries 
+ssh kafka@$SMPIP << 'EOF'
+  cd /tmp
+  # Download
+  curl -L https://dlcdn.apache.org/kafka/4.1.1/kafka_2.13-4.1.1.tgz -o kafka.tgz
+  tar -xzf kafka.tgz
+  
+  # Move to root and cleanup
+  sudo mv kafka_2.13-4.1.1 /
+  rm kafka.tgz
+  
+  # Create a symbolic link at /kafka
+  sudo ln -sfn /kafka_2.13-4.1.1 /kafka
+  
+  # Set permissions
+  sudo chown -R kafka:kafka /kafka_2.13-4.1.1
+  sudo chown -h kafka:kafka /kafka
+EOF
+
+# 1. Updated Environment Variable Script
+ssh kafka@$SMPIP << 'EOF'
+  # Define the symbolic link path
+  LINK_PATH=/kafka
+  JVMHS="-Xms4G -Xmx4G"
+ 
+  # Update .bash_profile
+  echo "export KAFKA_HOME=$LINK_PATH" >> ~/.bash_profile
+  echo "export PATH=$KAFKA_HOME/bin:$PATH" >> ~/.bash_profile
+  echo "export KAFKA_HEAP_OPTS='$JVMHS'" >> ~/.bash_profile 
+
+  echo "Environment variables updated to use $LINK_PATH"
+EOF
+
+# 2. Hhandle the 10MB limit for high-res images
+ssh kafka@$SMPIP << 'EOF'
+  source ~/.bash_profile
+  
+  CONFIG_FILE=$KAFKA_HOME/config/server.properties
+  
+  # 1. Update the global message limit to 10MB
+  if grep -q "message.max.bytes" $CONFIG_FILE; then
+    sudo sed -i 's/message.max.bytes=.*/message.max.bytes=20971520/' $CONFIG_FILE
+  else
+    echo "message.max.bytes=20971520" | sudo tee -a $CONFIG_FILE
+  fi
+
+  # 2. Increase network request limit (must be slightly larger than message.max.bytes)
+  if grep -q "socket.request.max.bytes" $CONFIG_FILE; then
+    sudo sed -i 's/socket.request.max.bytes=.*/socket.request.max.bytes=21000000/' $CONFIG_FILE
+  else
+    echo "socket.request.max.bytes=21000000" | sudo tee -a $CONFIG_FILE
+  fi
+EOF
+
+# 4. Cluster ID generation, Storage Formatting, and Server Start.
+ssh kafka@$SMPIP << 'EOF'
+  source ~/.bash_profile
+  cd $KAFKA_HOME
+
+  # 1. Handle Cluster ID
+  if [ -z "$KAFKA_CLUSTER_ID" ]; then
+    ID=$(bin/kafka-storage.sh random-uuid)
+    echo "export KAFKA_CLUSTER_ID=$ID" >> ~/.bash_profile
+    export KAFKA_CLUSTER_ID=$ID
+    echo "Generated new Cluster ID: $ID"
+  fi
+
+  # 2. Format Storage (KRaft Mode)
+  # Default log dir for KRaft is usually /tmp/kraft-combined-logs
+  if [ ! -d "/tmp/kraft-combined-logs" ]; then
+    echo "Formatting storage with ID $KAFKA_CLUSTER_ID..."
+    bin/kafka-storage.sh format --standalone -t $KAFKA_CLUSTER_ID -c config/server.properties
+  else
+    echo "Storage already formatted."
+  fi
+
+  # 3. Start Kafka in background
+  if ! pgrep -f kafka.Kafka > /dev/null; then
+    echo "Starting Kafka 4.1.1..."
+    nohup bin/kafka-server-start.sh config/server.properties > ~/kafka.log 2>&1 &
+    sleep 2
+    echo "Kafka is running (PID: $(pgrep -f kafka.Kafka))"
+  else
+    echo "Kafka is already running."
+  fi
+EOF
+
+# 3. Verify 10MB limit change
+ssh kafka@$SMPIP "grep \"message.max.bytes\" ~/kafka.log | tail -n 1"
+
+# 4. Create your Topics
+# Topic for map metadata (JSON)
+ssh kafka@$SMPIP << 'EOF'
+	source ~/.bash_profile
+	cd $KAFKA_HOME
+	bin/kafka-topics.sh --create --topic map-metadata --bootstrap-server localhost:9092 --partitions 3 --replication-factor 1
+EOF
+# Topic for raw image bytes (if you choose the "Inline" pattern)
+ssh kafka@$SMPIP << 'EOF'
+	source ~/.bash_profile
+	cd $KAFKA_HOME
+	bin/kafka-topics.sh --create --topic map-images --bootstrap-server localhost:9092 --partitions 3 --replication-factor 1
+EOF
+
+# 5. Start a Consumer (Open a new terminal)
+ssh kafka@$SMPIP << 'EOF'
+	source ~/.bash_profile
+	cd $KAFKA_HOME
+	# Start a consumer as part of "group-01"
+	bin/kafka-console-consumer.sh --topic map-metadata --bootstrap-server localhost:9092 --group map-processor-group
+EOF
+
+# 6. Send a Test JSON (Open a new terminal)
+ssh kafka@$SMPIP << 'EOF'
+  source ~/.bash_profile
+  # Create the JSON string
+  MESSAGE="{\"source\": \"NASA_GIBS\", \"tile_x\": 1024, \"tile_y\": 2048, \"timestamp\": \"$(date)\"}"
+  # Pipe it into the producer
+  echo $MESSAGE | $KAFKA_HOME/bin/kafka-console-producer.sh --topic map-metadata --bootstrap-server localhost:9092
+  echo "Message sent successfully to map-metadata topic."
+EOF
+
+# 7. Viewing JSON / messages in a topic
+ssh kafka@$SMPIP "/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic map-metadata --from-beginning --max-messages 1 | jq '.'"
+ssh kafka@$SMPIP "/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic map-metadata --from-beginning | jq '.'"
+ssh kafka@$SMPIP "/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic map-metadata"
+
+# 8. Install required libraries
+ssh kafka@$SMPIP "pip install confluent-kafka requests"
+
+# 9. Python script to pull and push into topics
+import requests
+import json
+import base64
+from confluent_kafka import Producer
+import datetime
+
+# --- Configuration ---
+KAFKA_BROKER = 'YOUR_SMPIP_HERE:9092' # Replace with your $SMPIP
+IMAGE_URL = "https://upload.wikimedia.org/wikipedia/commons/thumb/8/80/World_map_-_low_resolution.svg/1024px-World_map_-_low_resolution.svg.png"
+
+# Kafka Producer Config
+conf = {
+    'bootstrap.servers': KAFKA_BROKER,
+    'client.id': 'map-data-producer',
+    'message.max.bytes': 10485760 # Match the 10MB limit we set on the broker
+}
+producer = Producer(conf)
+
+def delivery_report(err, msg):
+    if err is not None:
+        print(f"Message delivery failed: {err}")
+    else:
+        print(f"Message delivered to {msg.topic()} [{msg.partition()}]")
+
+def fetch_and_push():
+    # 1. Pull the data from the website
+    print(f"Downloading image from {IMAGE_URL}...")
+    response = requests.get(IMAGE_URL)
+    
+    if response.status_code == 200:
+        # 2. Prepare Metadata
+        metadata = {
+            "source": "Showcase_Website",
+            "timestamp": str(datetime.datetime.now()),
+            "content_type": response.headers.get('Content-Type'),
+            "url": IMAGE_URL
+        }
+        
+        # 3. Prepare Image Data (Base64 encoded)
+        img_b64 = base64.b64encode(response.content).decode('utf-8')
+        image_payload = {
+            "file_name": "world_map.png",
+            "data": img_b64
+        }
+
+        # 4. Push to Kafka
+        # Send Metadata
+        producer.produce(
+            'map-metadata', 
+            value=json.dumps(metadata).encode('utf-8'), 
+            callback=delivery_report
+        )
+        
+        # Send Image
+        producer.produce(
+            'map-images', 
+            value=json.dumps(image_payload).encode('utf-8'), 
+            callback=delivery_report
+        )
+
+        # Flush ensures messages are sent before script ends
+        producer.flush()
+    else:
+        print("Failed to download image.")
+
+if __name__ == "__main__":
+    fetch_and_push()
+
+# A. Kafka Safe Restart
+ssh kafka@$SMPIP << 'EOF'
+  source ~/.bash_profile
+  cd $KAFKA_HOME
+  CONFIG_FILE=$KAFKA_HOME/config/server.properties
+  
+  # 3. Safe Restart
+  echo "Restarting Kafka safely"
+  sudo pkill -f kafka.Kafka
+  sleep 3
+  
+  # Start using the main server.properties
+  nohup bin/kafka-server-start.sh $CONFIG_FILE > ~/kafka.log 2>&1 &
+  
+  sleep 2
+  if pgrep -f kafka.Kafka > /dev/null; then
+    echo "Kafka is back online with new limits."
+  else
+    echo "Error: Kafka failed to start. Check ~/kafka.log"
+  fi
+EOF
+
+# B. Check current Kafka JVM Heap usage
+ssh kafka@$SMPIP << 'EOF'
+  # Find the Process ID (PID) for Kafka
+  KAFKA_PID=$(pgrep -f kafka.Kafka)
+  
+  if [ -z "$KAFKA_PID" ]; then
+    echo "Kafka is not running."
+  else
+    echo "Checking JVM Heap for PID $KAFKA_PID..."
+    # jstat -gc <pid> will show heap capacities (OC = Old Capacity, EC = Eden Capacity)
+    # Values are in KB
+    jcmd $KAFKA_PID GC.heap_info
+  fi
+EOF
